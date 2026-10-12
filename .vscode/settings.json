@@ -1,0 +1,16 @@
+{
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (mujoco_env)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "conda activate mujoco_env"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShell (mujoco_env)",
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
+}

@@ -1,0 +1,7 @@
+*.png
+/camera_calibration/
+/models/*
+*.pyc
+__pycache__/
+/results/
+.venv/

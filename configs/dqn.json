@@ -1,0 +1,28 @@
+{
+  "agent": {
+    "hidden_units": [300, 200],
+    "learning_rate": 0.001,
+    "discount": 0.9,
+    "tau": 0.999,
+    "epsilon_start": 0.9,
+    "epsilon_end": 0.05,
+    "epsilon_decay": 20000,
+    "replay_buffer_size": 10000,
+    "init_replay_buffer_size": 500,
+    "batch_size": 32,
+    "double_dqn": false
+  },
+  "environment": {
+    "object_count": 3,
+    "max_steps": 10,
+    "action_height_mode": "target_relative_v2",
+    "action_point_mode": "contour_2f85_half_width_plus_5mm_v1",
+    "push_distance_m": 0.08,
+    "push_speed_m_s": 0.08,
+    "descent_speed_m_s": 0.08,
+    "success_clearance_m": 0.02,
+    "change_height_m": 0.008,
+    "change_pixels": 500,
+    "clustering_steps": 100
+  }
+}
