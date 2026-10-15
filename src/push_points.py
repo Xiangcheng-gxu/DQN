@@ -1,15 +1,15 @@
-"""Contour push points and reference-style five-candidate height scoring."""
+"""推点获取：红色目标轮廓 -> 四边缘 -> 五个候选框 -> 最低可下降位置。"""
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 
-CANDIDATE_SHIFT_M = 0.01  # Reference: five pixels at 2 mm/pixel.
+CANDIDATE_SHIFT_M = 0.01  # 每次偏移10mm；在2mm/像素的图上相当于5像素。
 
 
 class PushPointError(RuntimeError):
-    """No usable target edge or fully observable candidate footprint."""
+    """没有可靠边缘或可下降候选点；抛出后不能继续调用推动控制器。"""
 
 
 @dataclass(frozen=True)
@@ -30,10 +30,9 @@ class PushPointSelection:
 
 
 def extract_target_contour(target_mask: np.ndarray) -> TargetContour | None:
-    """Use the reference blur, threshold, main contour and integer centroid.
+    """对掩码做3×3模糊和阈值化，再取主轮廓与整数质心。
 
-    The reference selects the contour with the most boundary vertices, not
-    the largest area. Area only breaks ties here; zero-area noise is ignored.
+    主轮廓按顶点数最多选择，面积只用于打破并列；过滤零面积噪声。
     """
     mask = np.asarray(target_mask, dtype=bool)
     if mask.ndim != 2:
@@ -54,7 +53,7 @@ def extract_target_contour(target_mask: np.ndarray) -> TargetContour | None:
 
 
 def _line_pixels(start, end):
-    """Bresenham traversal from centroid to the reference ray endpoint."""
+    """沿一条线逐像素行走，从目标质心走到边缘外，供轮廓交点搜索。"""
     x, y = (int(v) for v in start)
     ex, ey = (int(v) for v in end)
     dx, dy = abs(ex-x), -abs(ey-y)
@@ -74,13 +73,10 @@ def _line_pixels(start, end):
 
 
 def sample_target_edges(contour: np.ndarray) -> np.ndarray:
-    """Reference contour rays, corrected to the outer edge of the hit cell.
+    """从质心向四边搜索轮廓交点，仅供a0-a3使用。
 
-    Called only for actions 0--3. Missing intersections raise explicitly;
-    never fabricate a push point at pixel (0, 0). The reference tests a 2x2
-    neighbourhood but returns the traversal pixel, potentially one pixel
-    inside the contour. Return the actual hit instead, plus half a pixel
-    outward: the contour describes cell centres, not their physical edges.
+    按2×2邻域找实际命中像素，再向外补半个像素，得到像素格的外缘。
+    找不到交点就报告失败，不能用(0,0)假装找到推点。
     """
     moments = cv2.moments(contour)
     if moments["m00"] <= 0:
@@ -104,10 +100,10 @@ def sample_target_edges(contour: np.ndarray) -> np.ndarray:
 
 def gripper_footprint_mask(shape, center_xy_m, push_direction_rad, *,
                            origin_xy_m, resolution_m, along_push_m, across_push_m):
-    """Closed fingertip rectangle, local Y along push and local X across it.
+    """在高度图像素中心采样旋转矩形，返回哪些像素落入夹爪检测框。
 
-    Sample at heightmap cell centres; the 13 mm offset is not rounded to an
-    integer pixel. Unlike the reference's 16 x 16 mm square, 2F-85 is 16 x 22.
+    短边沿推向、长边垂直推向；实际指端16×22mm，外部传入含余量17×24mm。
+    这不是整个夹爪外壳，更不是整条推动轨迹的碰撞包络。
     """
     rows, columns = np.indices(shape)
     dx = origin_xy_m[0]+(columns+.5)*resolution_m-center_xy_m[0]
@@ -118,15 +114,17 @@ def gripper_footprint_mask(shape, center_xy_m, push_direction_rad, *,
 
 
 def select_push_point(heightmap, nominal_xy_m, push_direction_rad, *,
-                      origin_xy_m, resolution_m, along_push_m, across_push_m) -> PushPointSelection:
-    """Score original,+X,+Y,-X,-Y candidates by footprint maximum height.
+                      origin_xy_m, resolution_m, along_push_m, across_push_m,
+                      max_allowed_height_m=None) -> PushPointSelection:
+    """比较基准、+X、+Y、-X、-Y五个候选框内的最高点。
 
-    Select the smallest maximum, breaking ties in reference order. This is
-    local height ranking, NOT a guarantee of a collision-free entire path.
-    Fully out-of-view/clipped or non-finite footprints cannot receive a low
-    score from implicit zero padding.
+    框完整落在图内、数值有效、最高点不超过指端下降高度，才可以入选。
+    在入选点中取最高点最低的一个，并列取靠前者；低矮障碍物不一定被拒绝。
+    无候选时抛出PushPointError；不得用边界外补零冒充空白位置。
     """
     heights = np.asarray(heightmap)
+    if max_allowed_height_m is not None and not np.isfinite(max_allowed_height_m):
+        raise ValueError("Allowed descent height must be finite")
     origin = np.asarray(origin_xy_m, dtype=float)
     nominal = np.asarray(nominal_xy_m, dtype=float)
     dimensions = (resolution_m, along_push_m, across_push_m)
@@ -134,6 +132,7 @@ def select_push_point(heightmap, nominal_xy_m, push_direction_rad, *,
             or not np.isfinite((*origin, *nominal, push_direction_rad, *dimensions)).all()
             or min(dimensions) <= 0):
         raise ValueError("Invalid heightmap, coordinates or gripper dimensions")
+    # 偏移沿世界XY，而不是随夹爪转动的局部坐标；检测框本身随推向旋转。
     shifts = CANDIDATE_SHIFT_M*np.array(((0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)))
     candidates = nominal+shifts
     scores = np.full(5, np.inf)
@@ -149,7 +148,9 @@ def select_push_point(heightmap, nominal_xy_m, push_direction_rad, *,
                                      along_push_m=along_push_m, across_push_m=across_push_m)
         covered = heights[mask]
         if covered.size and np.isfinite(covered).all():
-            scores[i] = covered.max()
+            maximum = float(covered.max())
+            if max_allowed_height_m is None or maximum <= max_allowed_height_m:
+                scores[i] = maximum
     if not np.isfinite(scores).any():
-        raise PushPointError("All five push-point footprints are outside the heightmap or invalid")
+        raise PushPointError("No safe descent point: all five footprints are obstructed, outside the heightmap or invalid")
     return PushPointSelection(candidates, scores, int(np.argmin(scores)))

@@ -1,4 +1,8 @@
-"""Discrete push primitives matching the 0--7 action layout of the reference policy."""
+"""把a0到a7转换成夹爪底部中心的起点、终点和推动方向。
+
+a0-a3：目标边缘外找落点，低于目标顶面5mm，向目标内部推。
+a4-a7：不找推点，从目标中心出发，高于目标顶面5mm，向外推。
+"""
 
 from __future__ import annotations
 
@@ -14,16 +18,19 @@ from scene import WORKSPACE_LIMITS
 
 ACTION_COUNT = 8
 PUSH_DISTANCE_M = 0.08
-# Bottom-centre offset relative to the observed target top surface.
+# 所有动作高度均相对于视觉测得的目标顶面，不相对于相机或pinch原点。
 TARGET_HEIGHT_OFFSET_M = 0.005
 PUSH_POINT_CLEARANCE_M = 0.005
-# Bottom-centre to leading narrow edge (8 mm), plus 5 mm clearance.
+# 基准落点 = 目标边缘外偏13mm = 夹爪沿推向半宽8mm + 间隙5mm。
 TARGET_EDGE_OFFSET_M = Gripper2F85.CLOSED_TIP_ALONG_PUSH_M/2 + PUSH_POINT_CLEARANCE_M
+# 检测框总尺寸为17×24mm；是总共加1/2mm，不是每侧加，不修改实体模型。
+PUSH_FOOTPRINT_ALONG_M = Gripper2F85.CLOSED_TIP_ALONG_PUSH_M + .001
+PUSH_FOOTPRINT_ACROSS_M = Gripper2F85.CLOSED_TIP_ACROSS_PUSH_M + .002
 
 
 @dataclass(frozen=True)
 class PushPrimitive:
-    """One Cartesian, horizontal 2F-85 push command."""
+    """一个水平推动动作；起终点使用世界坐标米，控制点是夹爪底部中心。"""
 
     action_id: int
     start_position_m: np.ndarray
@@ -33,13 +40,7 @@ class PushPrimitive:
 
 
 class PushPrimitiveSet:
-    """Plan the eight discrete push actions used by the reference policy.
-
-    Actions 0--3 push inwards from the target's +X, +Y, -X, -Y boundaries.
-    Actions 4--7 start at the target centre and push respectively toward
-    +X, +Y, -X, -Y.  Positions refer to the calibrated gripper bottom centre.
-    Actions 0--3 operate 5 mm BELOW the target top; 4--7 operate 5 mm ABOVE.
-    """
+    """规划器不执行运动；训练和评估都通过plan_observation使用相同动作规则。"""
 
     def __init__(
         self,
@@ -62,14 +63,10 @@ class PushPrimitiveSet:
         *,
         target_height_m: float,
     ) -> PushPrimitive:
-        """Return the world-frame push command for action ``0`` through ``7``.
+        """由目标中心/四边缘建立几何动作，不负责检查落点能否下降。
 
-        For actions 0--3, ``target_boundary_xy_m`` contains four edge points in
-        [+X, +Y, -X, -Y] order, matching ``utils.push_sample`` in the reference
-        implementation. Actions 4--7 do not require or inspect edge points.
-        Training and demos use ``plan_observation`` for contour sampling and
-        five-candidate selection; this method only builds Cartesian geometry.
-        ``target_height_m`` is the target top height relative to the tabletop.
+        四个边缘点的顺序为+X、+Y、-X、-Y；a4-a7不使用这些边缘点。
+        target_height_m是目标相对桌面的高度，内部再加桌面世界Z。
         """
         if isinstance(action_id, bool) or not isinstance(action_id, (int, np.integer)) or not 0 <= action_id < ACTION_COUNT:
             raise ValueError("action_id must be an integer in 0..7")
@@ -85,11 +82,11 @@ class PushPrimitiveSet:
             boundary = np.asarray(target_boundary_xy_m, dtype=float)
             if boundary.shape != (4, 2) or not np.isfinite(boundary).all():
                 raise ValueError("target_boundary_xy_m must have shape (4, 2) in [+X, +Y, -X, -Y] order")
-            # 2F-85: half the narrow dimension plus the requested 5 mm gap.
+            # 目标边缘加13mm外偏，得到夹爪底部中心的基准落点。
             start_xy = boundary[direction_index] + outward_unit * self.target_edge_offset_m
             push_direction = (outward_direction + np.pi) % (2.0 * np.pi)
         else:
-            # Reference action 4--7: start at the target centre and push outward.
+            # a4-a7直接从目标中心向外推，不沿用边缘落点。
             start_xy = center
             push_direction = outward_direction
         end_xy = start_xy + self.push_distance_m * np.array((np.cos(push_direction), np.sin(push_direction)))
@@ -101,13 +98,12 @@ class PushPrimitiveSet:
         )
 
     def plan_observation(self, action_id: int, observation: Observation) -> PushPrimitive:
-        """The shared RGB-D action planner for training and action demos.
+        """从当前视觉观察找推点；仅a0-a3执行五候选落点筛选。
 
-        The reference local height score chooses XY only. It does not replace
-        the user's target_top -/+ 5 mm bottom-centre height convention.
+        筛选只改变XY，不改变规定的目标顶面±5mm动作高度。
+        找不到推点则抛PushPointError，由环境归类为空推，不强行下降。
         """
-        # Validate action and centre even when no contour exists. For 4--7,
-        # return immediately: no edge sampling, footprint or candidate search.
+        # a4-a7验证参数后直接返回，不搜索边缘、不建立五个检测框。
         if isinstance(action_id, bool) or not isinstance(action_id, (int, np.integer)) or not 0 <= action_id < ACTION_COUNT:
             raise ValueError("action_id must be an integer in 0..7")
         if action_id >= 4:
@@ -122,8 +118,9 @@ class PushPrimitiveSet:
         selection = select_push_point(
             observation.heightmap, primitive.start_position_m[:2], primitive.push_direction_rad,
             origin_xy_m=WORKSPACE_LIMITS[:2, 0], resolution_m=HEIGHTMAP_RESOLUTION_M,
-            along_push_m=Gripper2F85.CLOSED_TIP_ALONG_PUSH_M,
-            across_push_m=Gripper2F85.CLOSED_TIP_ACROSS_PUSH_M)
+            along_push_m=PUSH_FOOTPRINT_ALONG_M,
+            across_push_m=PUSH_FOOTPRINT_ACROSS_M,
+            max_allowed_height_m=primitive.start_position_m[2]-self.tabletop_z_m)
         shift = np.r_[selection.selected_xy_m-primitive.start_position_m[:2], 0.]
         return replace(primitive, start_position_m=primitive.start_position_m+shift,
                        end_position_m=primitive.end_position_m+shift, point_selection=selection)

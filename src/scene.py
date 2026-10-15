@@ -1,4 +1,8 @@
-"""MuJoCo scene creation, workspace definitions, and tabletop object generation."""
+"""场景定义与随机生成：工作空间、物体尺寸、初始摆放和水平聚拢。
+
+学生修改工作区/物体颜色尺寸时先看本文件顶部常量。
+注意这里的Z基准0.754m是世界坐标；动作里“离桌面0m”对应世界Z=0.754m。
+"""
 
 from __future__ import annotations
 
@@ -20,24 +24,25 @@ SCENE_PATH = PROJECT_ROOT / "models" / "scene.xml"
 DEFAULT_JOINT_ANGLES_DEG = np.asarray((0.0, -90.0, 90.0, -90.0, -90.0, 0.0), dtype=float)
 DEFAULT_GRIPPER_COMMAND = Gripper2F85.COMMAND_CLOSED
 
-# [x, y, z] bounds in metres. Z values are relative to the tabletop reference.
+# X/Y是世界坐标范围，Z是相对桌面的高度范围；单位都是米。
 WORKSPACE_LIMITS = np.asarray(((-0.75, -0.25), (-0.25, 0.25), (0.00, 0.40)), dtype=float)
 WORKSPACE_REFERENCE_Z_M = 0.754
 WORKSPACE_COLOR = (237, 234, 225)
 
-OBSTACLE_COLOR = (100, 150, 255)  # Light blue
+OBSTACLE_COLOR = (100, 150, 255)  # 浅蓝色障碍物，RGB整数0到255。
 TARGET_COLOR = (255, 0, 0)
 OBJECT_SIDE_RANGE_M = (0.03, 0.05)
 OBJECT_HEIGHT_CHOICES_M = (0.01, 0.02, 0.03, 0.04)
-# Target: 10 cm x 10 cm centred in the workspace.
+# 目标初始生成区：以工作区中心(-0.5,0)为中心的10×10cm区域。
 TARGET_SPAWN_LIMITS = np.asarray(((-0.55, -0.45), (-0.05, 0.05)), dtype=float)
-# Obstacles: the inner 40 cm x 40 cm area, excluding the target spawn area.
+# 障碍物初始生成区：50cm工作区四周各内缩10cm，剩30×30cm，再排除目标区。
+# 这是聚拢前的摆放范围；物体全底面必须在范围内，不只要求中心在里面。
 OBSTACLE_SPAWN_LIMITS = np.asarray(((-0.65, -0.35), (-0.15, 0.15)), dtype=float)
 
 
 @dataclass(frozen=True)
 class SceneObject:
-    """A fixed square-prism object resting on the workspace reference plane."""
+    """一个方柱物体的生成说明；不是仿真中每一步更新的实时位置。"""
 
     kind: str
     color: tuple[int, int, int]
@@ -53,7 +58,7 @@ class SceneObject:
 
 @dataclass
 class FixedScene:
-    """A loaded scene and its persistent joint and gripper control targets."""
+    """加载后的模型和数据；Fixed指默认机械臂控制目标，不代表杂乱物体固定。"""
 
     model: mujoco.MjModel
     data: mujoco.MjData
@@ -65,7 +70,7 @@ class FixedScene:
     clutter_displacements_m: tuple[float, ...] = ()
 
     def step(self) -> None:
-        """Reapply fixed robot controls and advance one physics step."""
+        """聚拢期间保持机械臂默认姿态及夹爪闭合，并计算一个物理步。"""
         for actuator_id, target in zip(self.robot._actuator_ids, self.joint_target_rad):
             self.data.ctrl[actuator_id] = target
         self.data.ctrl[self.gripper.actuator_id] = self.gripper_target
@@ -79,11 +84,11 @@ def create_object(
     occupied: Sequence[SceneObject] = (),
     dynamic: bool = False,
 ) -> SceneObject:
-    """Create one valid target or obstacle specification from its RGB colour.
+    """按颜色创建一个物体说明：红色为目标、浅蓝色为障碍物。
 
-    Red creates a target in the central 10 cm x 10 cm area. The obstacle colour
-    creates an obstacle in the surrounding inner 40 cm x 40 cm area, excluding
-    that target area. Every object has a square 3--5 cm base and a 1--4 cm height.
+    随机正方形边长3到5cm，高度从1/2/3/4cm等概率选择。
+    occupied是已有物体，初始摆放需保持至少5cm间隔；聚拢后不再保持该间隔。
+    dynamic=True时添加XY滑动自由度，物体可推但不能升起或倾倒。
     """
     rgb = _validate_object_color(color)
     generator = np.random.default_rng() if rng is None else rng
@@ -101,7 +106,7 @@ def create_fixed_scene(
     gripper_command: int = DEFAULT_GRIPPER_COMMAND,
     objects: Sequence[SceneObject] = (),
 ) -> FixedScene:
-    """Load the project scene, add fixed objects, and initialize a fixed robot pose."""
+    """加载XML并加入物体，设置六关节默认姿态、闭合指令和零初速度。"""
     object_tuple = tuple(objects)
     model = _load_model(object_tuple)
     data = mujoco.MjData(model)
@@ -124,11 +129,10 @@ def create_clutter_environment(
     clustering_steps: int = 100,
     attraction_force_n: float = 1.0,
 ) -> FixedScene:
-    """Create an initial clutter scene; call :func:`advance_clutter` to animate it.
+    """创建聚拢前的场景，再由环境反复调用advance_clutter完成聚拢。
 
-    An integer specifies the obstacle count. An inclusive two-item tuple samples
-    the obstacle count. The returned scene is intentionally unclustered so a
-    viewer can display it before the attraction phase begins.
+    整数表示障碍物数，不包含另加的1个目标；(最小数,最大数)包含两个端点。
+    每次朝目标XY施加attraction_force_n牛的水平力，持续clustering_steps步。
     """
     obstacle_count = _resolve_obstacle_count(object_count, rng)
     if clustering_steps < 1 or attraction_force_n <= 0:
@@ -144,9 +148,10 @@ def create_clutter_environment(
 
 
 def advance_clutter(scene: FixedScene) -> bool:
-    """Advance exactly one horizontal attraction step; return True when frozen."""
+    """聚拢推进一个物理步；结束返回True。聚拢后物体仍能移动，不固定它们。"""
     if getattr(scene, "_clutter_finished", False):
         return True
+    # 聚拢阶段临时保持目标XY不动，让其余物体向它靠近。
     target_id = scene._clutter_target_id
     target_qpos_adr = scene._clutter_target_qpos_adr
     target_dof_adr = scene._clutter_target_dof_adr
@@ -159,7 +164,7 @@ def advance_clutter(scene: FixedScene) -> bool:
         offset_xy = target_xy - obstacle_xy
         distance = float(np.linalg.norm(offset_xy))
         if distance > 1e-6:
-            # Continuous XY attraction; collision contact is the only stopping mechanism.
+            # 只给XY方向的力，不朝目标三维中心施力，不添加Z分量。
             scene.data.qfrc_applied[dof_adr:dof_adr + 2] = scene._clutter_force_n * offset_xy / distance
     scene.step()
     scene.data.qfrc_applied[:] = 0.0
@@ -171,6 +176,7 @@ def advance_clutter(scene: FixedScene) -> bool:
 
 
 def _prepare_clutter(scene: FixedScene, steps: int, force_n: float) -> None:
+    """缓存物体地址与初始位置；聚拢完成后还要验证障碍物确实移动过。"""
     target_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, "target_0")
     target_joint_id = scene.model.body_jntadr[target_id]
     scene._clutter_target_id = target_id
@@ -186,9 +192,7 @@ def _prepare_clutter(scene: FixedScene, steps: int, force_n: float) -> None:
 
 
 def _finish_clutter(scene: FixedScene) -> None:
-    """End attraction without constraining objects: clear forces and velocity only."""
-    # The target is restored to its original XY position, then all objects are
-    # left as normal movable planar bodies with no residual velocity or force.
+    """恢复目标位置、清空残余外力和速度，取消临时保持，不锁住物体。"""
     scene.data.qpos[scene._clutter_target_qpos_adr:scene._clutter_target_qpos_adr + 2] = scene._clutter_target_qpos
     scene.data.qvel[:] = 0.0
     scene.data.qfrc_applied[:] = 0.0
@@ -214,6 +218,7 @@ def _resolve_obstacle_count(object_count: int | tuple[int, int], rng: np.random.
     return int(generator.integers(low, high + 1))
 
 def _load_model(objects: Sequence[SceneObject]) -> mujoco.MjModel:
+    """临时拼接随机物体XML并编译；只删本函数生成的临时XML，不改原模型。"""
     if not objects:
         return mujoco.MjModel.from_xml_path(str(SCENE_PATH))
     tree = ET.parse(SCENE_PATH)
@@ -222,8 +227,8 @@ def _load_model(objects: Sequence[SceneObject]) -> mujoco.MjModel:
     temporary_paths: list[Path] = []
     try:
         if dynamic_scene:
-            # The included robot model has a robot-only keyframe. Free joints
-            # increase nq, so compile a temporary copy without that keyframe.
+            # 原机器人关键帧只包含机器人关节；增加物体滑动关节后维数不再相同。
+            # 临时副本移除旧关键帧，原XML不变，机械臂默认角由上层显式初始化。
             include = root.find("include")
             if include is None or not include.get("file"):
                 raise ValueError("Scene XML does not include the robot model")
@@ -248,7 +253,7 @@ def _load_model(objects: Sequence[SceneObject]) -> mujoco.MjModel:
         for index, item in enumerate(objects):
             body = ET.SubElement(worldbody, "body", name=f"{item.kind}_{index}", pos=f"{item.position_xy[0]:.6f} {item.position_xy[1]:.6f} {WORKSPACE_REFERENCE_Z_M:.6f}")
             if item.dynamic:
-                # Planar joints prevent gravity/collisions from lifting or tipping objects.
+                # 物体只有XY滑动自由度：教学简化，不模拟飞起、翻倒或绕Z旋转。
                 ET.SubElement(body, "joint", name=f"{item.kind}_slide_x_{index}", type="slide", axis="1 0 0", frictionloss="0.1", damping="0.5")
                 ET.SubElement(body, "joint", name=f"{item.kind}_slide_y_{index}", type="slide", axis="0 1 0", frictionloss="0.1", damping="0.5")
             attributes = {
@@ -261,8 +266,7 @@ def _load_model(objects: Sequence[SceneObject]) -> mujoco.MjModel:
             if item.kind == "obstacle":
                 attributes["material"] = "generated_obstacle_material"
             if item.dynamic:
-                # Dense clutter stays about 1 cm apart instead of interpenetrating.
-                # Near-hard contact: zero margin and the smallest stable time constant.
+                # 零碰撞余量和较硬接触参数；数值求解仍可能有很小的穿透误差。
                 attributes["margin"] = "0"
                 attributes["solref"] = "0.004 1"
                 attributes["solimp"] = "0.9999 0.99999 0.00001 0.5 2"
@@ -284,6 +288,7 @@ def _validate_object_color(color: Sequence[int]) -> tuple[int, int, int]:
 
 
 def _sample_position(allowed: np.ndarray, side_m: float, excluded: Sequence[np.ndarray], occupied: Sequence[SceneObject], rng: np.random.Generator) -> np.ndarray:
+    """最多抽样1000次，要求整个底面在允许区内且与已有物体保持间隔。"""
     half_side = side_m / 2
     low = allowed[:, 0] + half_side
     high = allowed[:, 1] - half_side
@@ -306,6 +311,6 @@ def _box_overlaps_limits(position: np.ndarray, side_m: float, limits: np.ndarray
 
 
 def _boxes_overlap(first_position: np.ndarray, first_side: float, second_position: np.ndarray, second_side: float) -> bool:
-    # Require at least 5 cm edge-to-edge separation in the XY plane.
+    # 聚拢前要求XY底面边缘至少相隔5cm，不是中心间隔5cm。
     clearance = (first_side + second_side) / 2 + 0.05
     return bool(abs(first_position[0] - second_position[0]) < clearance and abs(first_position[1] - second_position[1]) < clearance)

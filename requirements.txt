@@ -1,4 +1,7 @@
-numpy>=1.26,<3
-mujoco>=3.3,<4
-opencv-python-headless>=4.10,<4.12
-torch>=2.6,<3
+# Python 3.10 / Windows x64；锁定本项目已使用的CPU依赖组合。
+# +cpu限定PyTorch CPU构建，从官方CPU索引获取，不安装CUDA依赖。
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+mujoco==3.3.3
+opencv-python-headless==4.11.0.86
+torch==2.14.1+cpu

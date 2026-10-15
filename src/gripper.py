@@ -1,4 +1,4 @@
-"""Robotiq 2F-85 control through its single MuJoCo actuator."""
+"""2F-85夹爪：只通过fingers_actuator控制，不直接写两侧手指关节角。"""
 
 from __future__ import annotations
 
@@ -10,24 +10,21 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Gripper2F85:
-    """Control 2F-85 using the calibrated MJCF command convention.
+    """本模型指令0是全开，255是全闭，不需要再反向换算。
 
-    The model's ``fingers_actuator`` accepts 0--255 directly: 0 is fully open
-    and 255 is fully closed. Finger joints are never written directly; MuJoCo
-    resolves the linkage, tendon and equality constraints during ``mj_step``.
+    只写执行器ctrl，再由mj_step求解连杆、肌腱和约束；发出255不代表已经闭合。
+    推动前由控制器调用is_closed并等待指垫平行、位置稳定。
     """
 
     model: mujoco.MjModel
     actuator_name: str = "fingers_actuator"
 
-    MAX_OPENING_M = 0.085
-    # Measured closed, parallel-pad collision envelope at the bottom 5 mm.
-    # Local Y points along the push; local X is perpendicular to the push.
+    # 完全闭合且指垫平行时，底部5mm范围的碰撞包络，不是整个夹爪外壳尺寸。
+    # 沿推向16mm，横向22mm；用于在高度图中建立落点检测框。
     CLOSED_TIP_ALONG_PUSH_M = 0.016
     CLOSED_TIP_ACROSS_PUSH_M = 0.022
     COMMAND_OPEN = 0
     COMMAND_CLOSED = 255
-    CLOSE_SETTLE_TIME_S = 2.0
     CLOSED_STABLE_TIME_S = 0.1
     CLOSED_POSITION_TOLERANCE_RAD = 0.001
     PAD_ALIGNMENT_TOLERANCE_RAD = 0.001
@@ -52,25 +49,21 @@ class Gripper2F85:
     def actuator_id(self) -> int:
         return self._actuator_id
 
-    def opening_m(self, command: int) -> float:
-        """Return the nominal opening for a raw 0--255 actuator command."""
-        command = self._validate(command)
-        return self.MAX_OPENING_M * (self.COMMAND_CLOSED - command) / self.COMMAND_CLOSED
-
     def mujoco_control(self, command: int) -> float:
-        """Map a raw 0--255 command to the actuator control range without inversion."""
+        """把0到255指令映射到XML执行器ctrlrange，不反转开合方向。"""
         command = self._validate(command)
         low, high = self.model.actuator_ctrlrange[self.actuator_id]
         return float(low + (high - low) * command / self.COMMAND_CLOSED)
 
     def set_opening(self, data: mujoco.MjData, command: int) -> None:
-        """Write only the gripper actuator command; advance dynamics externally."""
+        """只写开合指令；调用方还需要执行物理步，手指才会真的运动。"""
         data.ctrl[self.actuator_id] = self.mujoco_control(command)
 
     def close(self, data: mujoco.MjData) -> None:
         self.set_opening(data, self.COMMAND_CLOSED)
 
     def is_closed(self, data: mujoco.MjData, *, settled: bool = True) -> bool:
+        """同时检查驱动关节闭合量和指垫平行；可选检查关节速度是否稳定。"""
         for joint in self._driver_joint_ids:
             if data.qpos[self.model.jnt_qposadr[joint]] < .775:
                 return False
@@ -83,14 +76,11 @@ class Gripper2F85:
         return True
 
     def pad_alignment_errors_rad(self, data: mujoco.MjData) -> tuple[float, float, float]:
-        """Left/right pad tilt relative to base Z, then their mutual angle."""
+        """返回左指垫倾角、右指垫倾角、两指垫夹角，单位为弧度。"""
         base_z = data.xmat[self._base_body_id].reshape(3, 3)[:, 2]
         left_z, right_z = (data.xmat[b].reshape(3, 3)[:, 2] for b in self._pad_body_ids)
         return tuple(float(np.arccos(np.clip(a @ b, -1, 1)))
                      for a, b in ((base_z, left_z), (base_z, right_z), (left_z, right_z)))
-
-    def open(self, data: mujoco.MjData) -> None:
-        self.set_opening(data, self.COMMAND_OPEN)
 
     @staticmethod
     def _validate(command: int) -> int:

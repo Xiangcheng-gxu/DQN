@@ -1,4 +1,4 @@
-"""Camera-only robot exclusion, without modifying physics/viewer models."""
+"""只在训练RGB/深度相机中隐藏机械臂、夹爪和相机外壳，不修改物理模型。"""
 from copy import copy
 
 import mujoco
@@ -6,12 +6,10 @@ import numpy as np
 
 
 class RobotHiddenRenderer(mujoco.Renderer):
-    """Render RGB/depth with robot, gripper and camera housing omitted.
+    """用相机自己的几何组开关隐藏物体，RGB和深度都能看到机械臂后方。
 
-    Use camera-local MjvOption.geomgroup to omit robot visual/collision groups
-    before rendering. Share the original model and data without copying or
-    modifying them. RGB and depth both see geometry behind the robot, unlike
-    transparent RGBA which can still occlude depth rendering.
+    group1是相机外壳，group2/3是机械臂显示/碰撞体；桌面物体不能用这三组。
+    viewer仍显示完整场景，机械臂的碰撞仍存在，不是把模型设透明或删除。
     """
 
     ROBOT_RENDER_GROUPS = (2, 3)
@@ -23,7 +21,7 @@ class RobotHiddenRenderer(mujoco.Renderer):
             raise ValueError("Cannot hide robot: UR5e root body 'base' is missing")
         robot_bodies = np.zeros(model.nbody, dtype=bool)
         robot_bodies[root] = True
-        # MuJoCo body indices are parent-before-child.
+        # MuJoCo父物体编号在子物体之前，顺序遍历即可找到机械臂的全部后代。
         for body in range(1, model.nbody):
             robot_bodies[body] |= robot_bodies[model.body_parentid[body]]
         robot_geoms = robot_bodies[model.geom_bodyid]
