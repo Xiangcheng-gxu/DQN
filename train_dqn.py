@@ -56,6 +56,7 @@ def train(args):
     (output/"config.json").write_text(json.dumps({"agent": vars(agent.config), "environment": vars(env.config)}, indent=2), encoding="utf-8")
     print("\n---------------- 训练开始 ----------------", flush=True)
     print(f"    回合数: {args.episodes} | 每回合最多: {env.config.max_steps}步 | 设备: CPU", flush=True)
+    print(f"    模型目录: {output.resolve()}\n    保存间隔: 每{args.save_every}回合保存一个独立模型", flush=True)
     preview_dir = Path(__file__).resolve().parent / "temp"
     print(f"    图片目录: {preview_dir}\n", flush=True)
     fieldnames = ["episode", "steps", "reward", "success", "reason", "epsilon", "loss", "buffer", "updates", "seconds"]
@@ -108,6 +109,7 @@ def train(args):
                             "success_statistics": vars(success_statistics).copy()}
                     agent.save(output/f"episode_{episode:06d}.pt", metadata=meta)
                     agent.save(output/"last.pt", metadata=meta)
+                    print(f"    第{episode}回合模型已保存: {output/f'episode_{episode:06d}.pt'}\n", flush=True)
     except KeyboardInterrupt:
         print("训练已中断, 正在保存模型和经验.", flush=True)
     finally:
@@ -128,8 +130,8 @@ def parse_args():
 
     # 2. 任务设置: 训练回合, 障碍物数量和步数上限
     task = parser.add_argument_group("任务设置")
-    task.add_argument("--episodes", type=int, default=300, help="本次训练回合数, 续训时为追加回合数")
-    task.add_argument("--object-count", type=int, default=1, help="障碍物数量")
+    task.add_argument("--episodes", type=int, default=3000, help="本次训练回合数, 续训时为追加回合数")
+    task.add_argument("--object-count", type=int, default=5, help="障碍物数量")
     task.add_argument("--max-steps", type=int, default=8, help="每回合最多步数(1至8)")
 
     # 3. 网络与学习: 网络结构, 学习率和目标网络更新
@@ -144,17 +146,17 @@ def parse_args():
     exploration = parser.add_argument_group("探索策略")
     exploration.add_argument("--epsilon-start", "--epsilon_start", type=float, default=1.0, help="初始探索率")
     exploration.add_argument("--epsilon-end", "--epsilon_end", type=float, default=0.005, help="最终探索率")
-    exploration.add_argument("--epsilon-decay", "--epsilon_decay", type=int, default=200, help="线性衰减终点回合, 第几回合达到最终探索率")
+    exploration.add_argument("--epsilon-decay", "--epsilon_decay", type=int, default=2500, help="线性衰减终点回合, 第几回合达到最终探索率")
 
     # 5. 经验回放: 容量, 预热经验数和采样批大小
     replay = parser.add_argument_group("经验回放")
-    replay.add_argument("--replay-buffer-size", "--replay_buffer_size", type=int, default=10000, help="经验池容量")
-    replay.add_argument("--warmup", "--init-replay-buffer-size", "--init_replay_buffer_size", type=int, default=80, help="开始学习前的经验数")
+    replay.add_argument("--replay-buffer-size", "--replay_buffer_size", type=int, default=50000, help="经验池容量")
+    replay.add_argument("--warmup", "--init-replay-buffer-size", "--init_replay_buffer_size", type=int, default=960, help="开始学习前的经验数")
     replay.add_argument("--batch-size", "--batch_size", type=int, default=32, help="学习批大小")
 
     # 6. 保存与续训: 新训练覆盖同名结果, 续训使用检查点配置
     saving = parser.add_argument_group("保存与续训")
-    saving.add_argument("--output", default=None, help="结果目录, 新训练使用results/dqn, 续训使用检查点目录")
+    saving.add_argument("--output", default="results/dqn_2000", help="结果目录, 新训练使用results/dqn, 续训使用检查点目录")
     saving.add_argument("--save-every", type=int, default=100, help="每隔多少回合保存检查点")
     saving.add_argument("--resume", default=None, help="从可信检查点续训, 沿用其学习和环境配置")
 

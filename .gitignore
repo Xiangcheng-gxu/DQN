@@ -6,3 +6,6 @@ __pycache__/
 /results/
 .venv/
 /temp/
+*.zip
+*.docx
+*.doc

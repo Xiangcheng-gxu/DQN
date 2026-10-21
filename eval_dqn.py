@@ -95,7 +95,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DQN模型评估", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # 1. 模型: 训练和推理都固定使用CPU
     model = parser.add_argument_group("模型")
-    model.add_argument("--checkpoint", "--model", default="results/dqn_300/last.pt", help="可信模型检查点")
+    model.add_argument("--checkpoint", "--model", default="results/dqn_2000/last.pt", help="可信模型检查点")
     # 2. 评估任务: 与训练参数独立, 未指定障碍物数时沿用模型配置
     task = parser.add_argument_group("评估任务")
     task.add_argument("--episodes", type=int, default=100, help="评估回合数")
@@ -104,7 +104,7 @@ def parse_args():
     task.add_argument("--max-steps", type=int, default=8, help="每回合最多步数(1至8)")
     # 3. 结果与可视化
     output = parser.add_argument_group("结果与可视化")
-    output.add_argument("--viewer", action="store_true", default=False, help="显示仿真窗口")
+    output.add_argument("--viewer", action="store_true", default=True, help="显示仿真窗口")
     output.add_argument("--output", default="results/evaluation.csv", help="独立评估CSV路径")
     args = parser.parse_args()
     if args.episodes < 1 or not 1 <= args.max_steps <= 8:
